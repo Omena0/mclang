@@ -1,0 +1,5 @@
+
+fn main() {
+    x = 5
+    print(f"Hello, {x}")
+}
