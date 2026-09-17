@@ -1,0 +1,5 @@
+
+fn main() {
+    a = "abc "*32
+    print(a)
+}

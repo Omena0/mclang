@@ -1,5 +1,8 @@
 
 fn main() {
-    x = 5
-    print(f"Hello, {x}")
+    comma = ", "
+    x = f"Hello{comma}"
+    y = 1
+    z = 4
+    print(f"{x+(y+z)}!")
 }

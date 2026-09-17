@@ -160,19 +160,64 @@ class Parser:
             {"type": "literal", "kind": "string", "value": value}
         )
 
+    def _parse_fstring(self, quote: str) -> dict:
+        self.stream.range()
+        parts: list[dict] = []
+        current_text: list[str] = []
+
+        while not self.stream.eof and not self._match(quote):
+            ch = self.stream.consume()
+            if ch == "\\" and not self.stream.eof:
+                nxt = self.stream.peek()
+                self.stream.consume()
+                esc = {
+                    "n": "\n",
+                    "t": "\t",
+                    "r": "\r",
+                    '"': '"',
+                    "'": "'",
+                    "\\": "\\",
+                }.get(nxt, nxt)
+                current_text.append(esc)
+
+            elif ch == "{":
+                if current_text:
+                    parts.append(
+                        self.stream.emit(
+                            {"type": "literal", "kind": "string", "value": "".join(current_text)}
+                        )
+                    )
+                    current_text = []
+                expr = self._parse_expr(nl=False)
+                self._expect("}")
+                parts.append(expr)
+            else:
+                current_text.append(ch)
+        self._expect(quote)
+        if current_text:
+            parts.append(
+                self.stream.emit(
+                    {"type": "literal", "kind": "string", "value": "".join(current_text)}
+                )
+            )
+        return self.stream.emit({"type": "fstring", "parts": parts})
+
     def _parse_number(self) -> dict:
         self.stream.range()
         digits = self.stream.consume_while(lambda c: c.isdigit())
         if self._match("."):
             self.stream.consume()
+
             frac = self.stream.consume_while(lambda c: c.isdigit())
             raw = digits + "." + frac
             value: int | float = float(raw)
             kind = "float"
+
         else:
             raw = digits
             value = int(raw, 10) if raw else 0
             kind = "int"
+
         return self.stream.emit(
             {"type": "literal", "kind": kind, "value": value}
         )
@@ -249,8 +294,11 @@ class Parser:
                     self._ws(True)
                     continue
                 break
+
         self._expect(")")
+
         body = self._parse_block()
+
         return self.stream.emit(
             {"type": "fn", "name": name, "params": params, "body": body}
         )
@@ -313,7 +361,9 @@ class Parser:
             self._expect(";")
             self._ws(True)
             update = self._parse_expr_or_empty()
+
             self._expect(")")
+
             return emit(
                 {
                     "type": "for",
@@ -353,11 +403,16 @@ class Parser:
             )
         self._expect(";")
         self._ws(True)
+
         cond = self._parse_expr_or_empty()
+
         self._expect(";")
         self._ws(True)
+
         update = self._parse_expr_or_empty()
+
         self._expect(")")
+
         return emit(
             {
                 "type": "for",
@@ -372,6 +427,7 @@ class Parser:
         self._expect("(")
         node = self._parse_expr(nl=True)
         self._expect(")")
+
         return node
 
     def _parse_block_or_brace(self) -> dict:
@@ -393,25 +449,32 @@ class Parser:
         left = self._parse_binop(0, nl)
         self._ws(nl)
         op = self._peek_assign_op()
+
         if op:
             self._consume_op(op)
             right = self._parse_expr(nl)
             return self.stream.emit(
                 {"type": "assign", "op": op, "target": left, "value": right}
             )
+
         return left
 
     def _parse_binop(self, min_prec: int, nl: bool) -> dict:
         left = self._parse_unary(nl)
         while True:
             self._ws(nl)
+
             op = self._peek_binop()
             if op is None:
                 break
+
             prec = _PRECEDENCE.get(op)
+
             if prec is None or prec < min_prec:
                 break
+
             self._consume_op(op)
+
             right = self._parse_binop(prec + 1, nl)
             left = self.stream.emit(
                 {"type": "binary", "op": op, "left": left, "right": right}
@@ -439,12 +502,14 @@ class Parser:
                 node = self.stream.emit(
                     {"type": "call", "callee": node, "args": args}
                 )
+
             elif self._match("."):
                 self.stream.consume()
                 name = self._parse_ident()
                 node = self.stream.emit(
                     {"type": "member", "object": node, "name": name}
                 )
+
             elif self._match("["):
                 self.stream.consume()
                 idx = self._parse_expr(nl=True)
@@ -453,6 +518,7 @@ class Parser:
                 node = self.stream.emit(
                     {"type": "index", "object": node, "index": idx}
                 )
+
             else:
                 break
         return node
@@ -463,15 +529,19 @@ class Parser:
         if self._match(")"):
             self.stream.consume()
             return args
+
         while True:
             args.append(self._parse_expr(nl=True))
+
             self._ws(True)
             if self._match(","):
                 self.stream.consume()
                 self._ws(True)
                 continue
             break
+
         self._expect(")")
+
         return args
 
     def _parse_primary(self, nl: bool) -> dict:
@@ -482,26 +552,40 @@ class Parser:
             self._ws(True)
             self._expect(")")
             return node
+
         if self._match('"'):
             return self._parse_string('"')
+
         if self._match("'"):
             return self._parse_string("'")
+
         c = self.stream.peek()
         if c and c.isdigit():
             return self._parse_number()
+
         if c == "." and self.stream.peek(2)[1:2].isdigit():
             return self._parse_number()
+
+        if c == 'f' and self.stream.peek(2)[1:2] in ('"', "'"):
+            self.stream.consume()  # consume 'f'
+            quote = self.stream.peek()
+            self.stream.consume()  # consume opening quote
+            return self._parse_fstring(quote)
+
         word = self.stream.consume_word()
         if not word:
             self.stream.error("SyntaxError", "Expected an expression")
+
         if word == "true":
             return self.stream.emit(
                 {"type": "literal", "kind": "boolean", "value": True}
             )
+
         if word == "false":
             return self.stream.emit(
                 {"type": "literal", "kind": "boolean", "value": False}
             )
+
         return self.stream.emit({"type": "identifier", "name": word})
 
     # ------------------------------------------------------------------ #

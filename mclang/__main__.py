@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 
-from .compile import compile_source
-from .ir import lower
+from .compile import compile_ast, compile_source
+from .ir import lower, to_text
+from .opt import optimize
 from .parse import Parser
 
 
@@ -26,7 +28,18 @@ def cmd_compile(args: argparse.Namespace) -> None:
     try:
         ast = Parser(text).parse()
         ir = lower(ast)
-        compile_source(text, out_dir)
+
+        if args.opt:
+            ir = optimize(ir)
+
+        if args.ir:
+            with open('out.ir','w') as f:
+                f.write(to_text(ir))
+
+        if out_dir:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            compile_ast(ir, out_dir)
+
     except NotImplementedError as exc:
         print(f"CompileError: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -54,6 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
         "output",
         help="Output directory for generated .mcfunction files.",
     )
+    compile_parser.add_argument(
+        "--ir",
+        action="store_true",
+        default=False,
+        help="Print the lowered IR to stdout.",
+    )
+    compile_parser.add_argument(
+        "--opt",
+        action="store_true",
+        default=False,
+        help="Run the optimization pass before compiling.",
+    )
     compile_parser.set_defaults(func=cmd_compile)
 
     return parser
@@ -67,3 +92,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

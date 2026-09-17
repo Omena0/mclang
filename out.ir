@@ -1,0 +1,4 @@
+fn main()
+  mul a "abc " 32
+  call print(a)
+end

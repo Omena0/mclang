@@ -1,5 +1,6 @@
-scoreboard players set _arg0 _var 100
-function fib
-scoreboard players operation x _var_main = _ret _var
-tellraw @a [{"score": {"name": "x", "objective": "_var_main"}}]
-tellraw @a ["Hello, World!"]
+data modify storage mypack:mem main._s0 set value []
+data modify storage mypack:mem main._s1 set value [{"text":"abc "}]
+scoreboard players set _t0 _var 32
+function main/str_mul_body/1
+data modify storage mypack:mem main.a set from storage mypack:mem main._s0
+tellraw @a [{"nbt": "main.a", "storage": "mypack:mem"}]

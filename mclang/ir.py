@@ -285,6 +285,22 @@ class IRLowerer:
             self._emit(out, "get_index", target=tgt, obj=obj, index=idx)
             return self._var(tgt)
 
+        if et == "fstring":
+            parts = []
+            for part in expr["parts"]:
+                if part["type"] == "literal":
+                    parts.append(self._lit(part))
+                elif part["type"] == "identifier":
+                    parts.append(self._var(part["name"]))
+                else:
+                    lowered = self._lower_expr(part, out)
+                    parts.append(lowered)
+            fstring_val = {"type": "fstring", "parts": parts}
+            if result_var is not None:
+                self._emit(out, "set", target=result_var, value=fstring_val)
+                return self._var(result_var)
+            return fstring_val
+
         raise ValueError(f"Cannot lower expression node: {et}")
 
     def _store_value(self, target: dict, value: dict, out: list[dict]) -> None:
@@ -410,6 +426,16 @@ def _fmt_value(v: dict) -> str:
         return str(val)
     if v["type"] == "var":
         return v["name"]
+    if v["type"] == "fstring":
+        parts = []
+        for part in v["parts"]:
+            if part["type"] == "literal":
+                parts.append(part["value"])
+            elif part["type"] == "var":
+                parts.append(f"{{{part['name']}}}")
+            else:
+                parts.append(f"{{{_fmt_value(part)}}}")
+        return f'f"{"".join(parts)}"'
     raise ValueError("bad value")
 
 
