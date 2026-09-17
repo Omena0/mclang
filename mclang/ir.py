@@ -45,6 +45,19 @@ class IRLowerer:
 
     def __init__(self) -> None:
         self._temp_counter = 0
+        self._types: dict[str, str] = {}
+
+    def _track_type(self, name: str, value: dict) -> None:
+        if value.get("type") == "literal":
+            if isinstance(value.get("value"), str):
+                self._types[name] = "string"
+            elif isinstance(value.get("value"), (int, float)):
+                self._types[name] = "number"
+        elif value.get("type") == "fstring":
+            self._types[name] = "string"
+        elif value.get("type") == "var":
+            if value["name"] in self._types:
+                self._types[name] = self._types[value["name"]]
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -223,6 +236,7 @@ class IRLowerer:
             v = self._lit(expr)
             if result_var is not None:
                 self._emit(out, "set", target=result_var, value=v)
+                self._track_type(result_var, v)
                 return self._var(result_var)
             return v
 
@@ -230,6 +244,7 @@ class IRLowerer:
             v = self._var(expr["name"])
             if result_var is not None:
                 self._emit(out, "set", target=result_var, value=v)
+                self._track_type(result_var, v)
                 return self._var(result_var)
             return v
 
@@ -238,7 +253,13 @@ class IRLowerer:
             rv = self._lower_expr(expr["right"], out)
             tgt = result_var if result_var is not None else self._fresh()
             irop = _BINOP_IR[expr["op"]]
+            if irop == "mul" and self._is_str_mul(lv, rv):
+                self._lower_str_mul(lv, rv, tgt, out)
+                self._types[tgt] = "string"
+                return self._var(tgt)
             self._emit(out, irop, target=tgt, left=lv, right=rv)
+            if irop == "add" and (self._is_str_value(lv) or self._is_str_value(rv)):
+                self._types[tgt] = "string"
             return self._var(tgt)
 
         if et == "unary":
@@ -249,6 +270,7 @@ class IRLowerer:
                 self._emit(out, "neg", target=tgt, operand=ov)
             elif op == "+":
                 self._emit(out, "set", target=tgt, value=ov)
+                self._track_type(tgt, ov)
             elif op == "!":
                 self._emit(out, "not", target=tgt, operand=ov)
             return self._var(tgt)
@@ -260,12 +282,14 @@ class IRLowerer:
                 self._lower_expr(expr["value"], out, result_var=tgt)
                 if result_var is not None and result_var != tgt:
                     self._emit(out, "set", target=result_var, value=self._var(tgt))
+                    self._track_type(result_var, self._var(tgt))
                     return self._var(result_var)
                 return self._var(tgt)
             rv = self._lower_expr(expr["value"], out)
             self._store_value(expr["target"], rv, out)
             if result_var is not None:
                 self._emit(out, "set", target=result_var, value=rv)
+                self._track_type(result_var, rv)
                 return self._var(result_var)
             return rv
 
@@ -371,6 +395,128 @@ class IRLowerer:
             "cond": cond_val,
             "body": body,
         }
+
+    def _is_str_mul(self, lv: dict, rv: dict) -> bool:
+        """Detect string * int multiplication."""
+        def is_str(v):
+            if v.get("type") == "literal" and isinstance(v.get("value"), str):
+                return True
+            if v.get("type") == "var" and self._types.get(v["name"]) == "string":
+                return True
+            if v.get("type") == "fstring":
+                return True
+            return False
+
+        def is_num(v):
+            if v.get("type") == "literal" and isinstance(v.get("value"), (int, float)):
+                return True
+            if v.get("type") == "var" and self._types.get(v["name"]) == "number":
+                return True
+            return False
+
+        return (is_str(lv) and is_num(rv)) or (is_num(lv) and is_str(rv))
+
+    def _is_str_value(self, v: dict) -> bool:
+        if v.get("type") == "literal" and isinstance(v.get("value"), str):
+            return True
+        if v.get("type") == "var" and self._types.get(v["name"]) == "string":
+            return True
+        if v.get("type") == "fstring":
+            return True
+        return False
+
+    def _lower_str_mul(self, lv: dict, rv: dict, target: str, out: list[dict]) -> None:
+        """Lower string * int multiplication using binary exponentiation.
+
+        result = ""
+        power = original
+        while n > 0:
+            if n & 1:
+                result = result + power
+            n >>= 1
+            if n > 0:
+                power = power + power
+        """
+        if self._is_str_value(lv):
+            str_val, num_val = lv, rv
+        else:
+            str_val, num_val = rv, lv
+
+        self._types[target] = "string"
+
+        result_var = self._fresh()
+        power_var = self._fresh()
+        n_var = self._fresh()
+
+        # result = ""
+        self._emit(out, "set", target=result_var,
+                   value={"type": "literal", "kind": "string", "value": ""})
+        # power = original
+        self._emit(out, "set", target=power_var, value=str_val)
+        # n = count
+        self._emit(out, "set", target=n_var, value=num_val)
+
+        # --- while n > 0 ---
+        cond_var = self._fresh()
+        cond_ops: list[dict] = []
+        self._emit(cond_ops, "gt", target=cond_var,
+                   left={"type": "var", "name": n_var},
+                   right={"type": "literal", "value": 0})
+        body_ops: list[dict] = []
+
+        # if n & 1: result = result + power
+        bit_var = self._fresh()
+        self._emit(body_ops, "set", target=bit_var,
+                   value={"type": "var", "name": n_var})
+        self._emit(body_ops, "mod", target=bit_var,
+                   left={"type": "var", "name": bit_var},
+                   right={"type": "literal", "value": 2})
+
+        then_ops: list[dict] = []
+        self._emit(then_ops, "add", target=result_var,
+                   left={"type": "var", "name": result_var},
+                   right={"type": "var", "name": power_var})
+        body_ops.append({
+            "op": "if",
+            "cond_ops": [],
+            "cond": {"type": "var", "name": bit_var},
+            "body": then_ops,
+            "else": None,
+        })
+
+        # n >>= 1
+        self._emit(body_ops, "div", target=n_var,
+                   left={"type": "var", "name": n_var},
+                   right={"type": "literal", "value": 2})
+
+        # if n > 0: power = power + power
+        cond_var2 = self._fresh()
+        cond_ops2: list[dict] = []
+        self._emit(cond_ops2, "gt", target=cond_var2,
+                   left={"type": "var", "name": n_var},
+                   right={"type": "literal", "value": 0})
+        double_ops: list[dict] = []
+        self._emit(double_ops, "add", target=power_var,
+                   left={"type": "var", "name": power_var},
+                   right={"type": "var", "name": power_var})
+        body_ops.append({
+            "op": "if",
+            "cond_ops": cond_ops2,
+            "cond": {"type": "var", "name": cond_var2},
+            "body": double_ops,
+            "else": None,
+        })
+
+        out.append({
+            "op": "while",
+            "cond_ops": cond_ops,
+            "cond": {"type": "var", "name": cond_var},
+            "body": body_ops,
+        })
+
+        # target = result
+        self._emit(out, "set", target=target,
+                   value={"type": "var", "name": result_var})
 
     def _lower_for(self, node: dict) -> dict:
         init = self._lower_for_header(node.get("init"))

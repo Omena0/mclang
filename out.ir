@@ -1,4 +1,20 @@
 fn main()
-  mul a "abc " 32
+  set _t0 = ""
+  set _t1 = "abc "
+  set _t2 = 32
+  begin_while _t3
+    gt _t3 _t2 0
+    set _t4 = _t2
+    mod _t4 _t4 2
+    begin_if _t4
+      add _t0 _t0 _t1
+    end_if
+    div _t2 _t2 2
+    begin_if _t5
+      gt _t5 _t2 0
+      add _t1 _t1 _t1
+    end_if
+  end_while
+  set a = _t0
   call print(a)
 end

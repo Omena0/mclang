@@ -294,7 +294,11 @@ class MCCompiler:
             src = value["name"]
             if src in self._types:
                 self._types[target] = self._types[src]
-            if is_temp:
+            if is_temp and self._types.get(target) == "string":
+                sv = self._str_temp()
+                self._str_var_map[target] = sv
+                self._copy_var(sv, src, out)
+            elif is_temp:
                 src_path = self._var_path(src)
                 if src_path is None:
                     out.append(f"scoreboard players operation {target} _var = {src} _var")
@@ -339,13 +343,6 @@ class MCCompiler:
             return True
         return False
 
-    def _is_num_value(self, v: dict) -> bool:
-        if v.get("type") == "literal" and isinstance(v.get("value"), (int, float)):
-            return True
-        if v.get("type") == "var" and self._types.get(v["name"]) == "number":
-            return True
-        return False
-
     def _str_concat(self, inst: dict, out: list[str]) -> None:
         target = inst["target"]
         left = inst["left"]
@@ -368,144 +365,7 @@ class MCCompiler:
         out.append(f"data modify {path} set value {json.dumps(components, separators=(',', ':'))}")
 
     def _op_sub(self, inst, out): self._arith("sub", inst, out)
-    def _op_mul(self, inst, out):
-        if self._is_str_mul(inst):
-            self._emit_str_mul(inst, out)
-        else:
-            self._arith("mul", inst, out)
-
-    def _is_str_mul(self, inst: dict) -> bool:
-        left = inst.get("left", {})
-        right = inst.get("right", {})
-        return (self._is_str_value(left) and self._is_num_value(right)) or \
-               (self._is_num_value(left) and self._is_str_value(right))
-
-    def _emit_str_mul(self, inst: dict, out: list[str]) -> None:
-        """Multiply a string by an integer using binary exponentiation.
-
-        Algorithm: result = "", power = original
-        while n > 0:
-            if n & 1: result = result + power
-            n >>= 1
-            if n > 0: power = power + power
-        """
-        target = inst["target"]
-        left = inst["left"]
-        right = inst["right"]
-
-        if self._is_str_value(left):
-            str_val, num_val = left, right
-        else:
-            str_val, num_val = right, left
-
-        self._types[target] = "string"
-
-        # Base case: for small n, just emit n copies inline
-        if num_val["type"] == "literal":
-            n = int(num_val["value"])
-            if n <= 0:
-                path = self._var_path(target)
-                out.append(f"data modify {path} set value []")
-                return
-            if n <= 4:
-                components = self._value_to_components(str_val)
-                all_comps = components * n
-                if target.startswith("_t"):
-                    sv = self._str_temp()
-                    self._str_var_map[target] = sv
-                    path = self._var_path(sv)
-                else:
-                    path = self._var_path(target)
-                out.append(
-                    f"data modify {path} set value "
-                    f"{json.dumps(all_comps, separators=(',', ':'))}"
-                )
-                return
-
-        result_var = self._str_temp()
-        power_var = self._str_temp()
-        count_temp = self._temp()
-
-        result_path = self._var_path(result_var)
-        power_path = self._var_path(power_var)
-
-        # Initialize result to empty list
-        out.append(f"data modify {result_path} set value []")
-
-        # Initialize power as a component array
-        power_components = self._value_to_components(str_val)
-        out.append(
-            f"data modify {power_path} set value "
-            f"{json.dumps(power_components, separators=(',', ':'))}"
-        )
-
-        # Load count into scoreboard temp
-        if num_val["type"] == "literal":
-            out.append(f"scoreboard players set {count_temp} _var {int(num_val['value'])}")
-        else:
-            self._load_to_temp(num_val, count_temp, out)
-
-        # --- loop body: while count > 0 ---
-        body_path, body_body = self._new_block("str_mul_body", self._func)
-
-        # Exit if count <= 0
-        body_body.append(
-            f"execute unless score {count_temp} _var matches 1.. run return 0"
-        )
-
-        # if count & 1: result = result + power
-        bit_temp = self._temp()
-        body_body.append(
-            f"scoreboard players operation {bit_temp} _var = {count_temp} _var"
-        )
-        body_body.append(
-            f"scoreboard players operation {bit_temp} _var %= 2"
-        )
-
-        append_path, append_body = self._new_block("str_mul_append", self._func)
-        append_body.append(f"data modify {result_path} append from {power_path}")
-        append_body.append("return 0")
-        body_body.append(
-            f"execute if score {bit_temp} _var matches 1.. "
-            f"run function {append_path}"
-        )
-
-        # n >>= 1
-        body_body.append(
-            f"scoreboard players operation {count_temp} _var /= 2"
-        )
-
-        # if n > 0: power = power + power
-        dbl_path, dbl_body = self._new_block("str_mul_double", self._func)
-        dbl_path2, dbl_body2 = self._new_block("str_mul_double2", self._func)
-        dbl_body.append(
-            f"execute if score {count_temp} _var matches 1.. "
-            f"run function {dbl_path2}"
-        )
-        dbl_body.append("return 0")
-        dbl_body2.append(f"data modify {power_path} append from {power_path}")
-        dbl_body2.append("return 0")
-        body_body.append(f"function {dbl_path}")
-
-        # Recursive call
-        body_body.append(f"function {body_path}")
-        body_body.append("return 0")
-
-        # Kick off the loop
-        out.append(f"function {body_path}")
-
-        # Copy result to target
-        self._copy_str_to_target(target, result_path, out)
-
-    def _copy_str_to_target(self, target: str, src_path: str, out: list[str]) -> None:
-        """Copy a string component-array from src_path into target."""
-        if target.startswith("_t"):
-            sv = self._str_temp()
-            self._str_var_map[target] = sv
-            target_path = self._var_path(sv)
-        else:
-            target_path = self._var_path(target)
-        out.append(f"data modify {target_path} set from {src_path}")
+    def _op_mul(self, inst, out): self._arith("mul", inst, out)
     def _op_div(self, inst, out): self._arith("div", inst, out)
     def _op_mod(self, inst, out): self._arith("mod", inst, out)
 
