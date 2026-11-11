@@ -1,0 +1,4 @@
+$function type_check with storage mypack:mem {path: "$(input)"}
+$execute if score _typeof _var matches 7 run function stdlib/string/len with storage mypack:mem {input: "$(input)", output: "$(output)"}
+$execute if score _typeof _var matches 1..6 run function cast_to_string with storage mypack:mem {input: "$(input)", line: $(line)}
+$execute if score _typeof _var matches 9 run function type_error with storage mypack:mem {input: "$(input)", expected: "string", line: $(line)}

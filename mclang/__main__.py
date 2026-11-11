@@ -40,10 +40,7 @@ def cmd_compile(args: argparse.Namespace) -> None:
             shutil.rmtree(out_dir, ignore_errors=True)
             compile_ast(ir, out_dir)
 
-    except NotImplementedError as exc:
-        print(f"CompileError: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except SyntaxError as exc:
+    except (NotImplementedError, SyntaxError) as exc:
         print(f"CompileError: {exc}", file=sys.stderr)
         sys.exit(1)
 

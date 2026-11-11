@@ -1,9 +1,11 @@
 
 # MClang
 
-A language that compiles to .mcfunction.
+A dynamically hybrid typed, general purpose language that compiles to mcfunction.
 
 Features:
 
 - Scoped variables via storages
-- String concat and multiplication
+- Fully featured stdlib
+- Hybrid typing with type analysis
+- Only fall back to runtime type checking when necessary

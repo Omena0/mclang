@@ -98,11 +98,7 @@ class TextStream:
         start = self._pos
         end = self._text.find(text, start)
 
-        if end == -1:
-            self._pos = len(self._text)
-        else:
-            self._pos = end
-
+        self._pos = len(self._text) if end == -1 else end
         return self._text[start:self._pos]
 
     def consume_while(self, predicate: Callable[[str], bool]) -> str:
@@ -228,9 +224,7 @@ class TextStream:
     def __eq__(self, other: object) -> bool | NotImplementedType:
         if isinstance(other, TextStream):
             return self._text == other._text
-        if isinstance(other, str):
-            return self._text == other
-        return NotImplemented
+        return self._text == other if isinstance(other, str) else NotImplemented
 
     def __repr__(self) -> str:
         return (

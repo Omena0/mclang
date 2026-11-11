@@ -112,8 +112,7 @@ class IRLowerer:
         raise ValueError(f"Not a simple value: {node['type']}")
 
     def _emit(self, out: list[dict], op: str, **fields) -> dict:
-        instr = {"op": op}
-        instr.update(fields)
+        instr = {"op": op} | fields
         out.append(instr)
         return instr
 
@@ -257,6 +256,10 @@ class IRLowerer:
                 self._lower_str_mul(lv, rv, tgt, out)
                 self._types[tgt] = "string"
                 return self._var(tgt)
+            if irop == "add" and (self._is_str_value(lv) or self._is_str_value(rv)):
+                self._lower_str_concat(lv, rv, tgt, out)
+                self._types[tgt] = "string"
+                return self._var(tgt)
             self._emit(out, irop, target=tgt, left=lv, right=rv)
             if irop == "add" and (self._is_str_value(lv) or self._is_str_value(rv)):
                 self._types[tgt] = "string"
@@ -343,9 +346,7 @@ class IRLowerer:
     # Value/condition helpers
     # ------------------------------------------------------------------ #
     def _lower_return_value(self, node: dict | None, out: list[dict]) -> dict | None:
-        if node is None:
-            return None
-        return self._lower_expr(node, out)
+        return None if node is None else self._lower_expr(node, out)
 
     def _lower_condition(self, node: dict) -> tuple[list[dict], dict]:
         """Lower a condition expression -> (instrs, Value).
@@ -403,16 +404,12 @@ class IRLowerer:
                 return True
             if v.get("type") == "var" and self._types.get(v["name"]) == "string":
                 return True
-            if v.get("type") == "fstring":
-                return True
-            return False
+            return v.get("type") == "fstring"
 
         def is_num(v):
             if v.get("type") == "literal" and isinstance(v.get("value"), (int, float)):
                 return True
-            if v.get("type") == "var" and self._types.get(v["name"]) == "number":
-                return True
-            return False
+            return v.get("type") == "var" and self._types.get(v["name"]) == "number"
 
         return (is_str(lv) and is_num(rv)) or (is_num(lv) and is_str(rv))
 
@@ -421,102 +418,40 @@ class IRLowerer:
             return True
         if v.get("type") == "var" and self._types.get(v["name"]) == "string":
             return True
-        if v.get("type") == "fstring":
-            return True
-        return False
+        return v.get("type") == "fstring"
 
     def _lower_str_mul(self, lv: dict, rv: dict, target: str, out: list[dict]) -> None:
-        """Lower string * int multiplication using binary exponentiation.
-
-        result = ""
-        power = original
-        while n > 0:
-            if n & 1:
-                result = result + power
-            n >>= 1
-            if n > 0:
-                power = power + power
-        """
-        if self._is_str_value(lv):
-            str_val, num_val = lv, rv
-        else:
-            str_val, num_val = rv, lv
-
+        """Lower string * int multiplication by emitting a stdlib_call IR op."""
+        str_val, num_val = (lv, rv) if self._is_str_value(lv) else (rv, lv)
         self._types[target] = "string"
 
-        result_var = self._fresh()
-        power_var = self._fresh()
-        n_var = self._fresh()
+        str_var = self._fresh()
+        num_var = self._fresh()
+        self._emit(out, "set", target=str_var, value=str_val)
+        self._emit(out, "set", target=num_var, value=num_val)
+        self._emit(
+            out,
+            "stdlib_call",
+            target=target,
+            stdlib="stdlib/string/multiply",
+            args=[{"type": "var", "name": str_var}, {"type": "var", "name": num_var}],
+        )
 
-        # result = ""
-        self._emit(out, "set", target=result_var,
-                   value={"type": "literal", "kind": "string", "value": ""})
-        # power = original
-        self._emit(out, "set", target=power_var, value=str_val)
-        # n = count
-        self._emit(out, "set", target=n_var, value=num_val)
+    def _lower_str_concat(self, lv: dict, rv: dict, target: str, out: list[dict]) -> None:
+        """Lower string concatenation by emitting a stdlib_call IR op."""
+        self._types[target] = "string"
 
-        # --- while n > 0 ---
-        cond_var = self._fresh()
-        cond_ops: list[dict] = []
-        self._emit(cond_ops, "gt", target=cond_var,
-                   left={"type": "var", "name": n_var},
-                   right={"type": "literal", "value": 0})
-        body_ops: list[dict] = []
-
-        # if n & 1: result = result + power
-        bit_var = self._fresh()
-        self._emit(body_ops, "set", target=bit_var,
-                   value={"type": "var", "name": n_var})
-        self._emit(body_ops, "mod", target=bit_var,
-                   left={"type": "var", "name": bit_var},
-                   right={"type": "literal", "value": 2})
-
-        then_ops: list[dict] = []
-        self._emit(then_ops, "add", target=result_var,
-                   left={"type": "var", "name": result_var},
-                   right={"type": "var", "name": power_var})
-        body_ops.append({
-            "op": "if",
-            "cond_ops": [],
-            "cond": {"type": "var", "name": bit_var},
-            "body": then_ops,
-            "else": None,
-        })
-
-        # n >>= 1
-        self._emit(body_ops, "div", target=n_var,
-                   left={"type": "var", "name": n_var},
-                   right={"type": "literal", "value": 2})
-
-        # if n > 0: power = power + power
-        cond_var2 = self._fresh()
-        cond_ops2: list[dict] = []
-        self._emit(cond_ops2, "gt", target=cond_var2,
-                   left={"type": "var", "name": n_var},
-                   right={"type": "literal", "value": 0})
-        double_ops: list[dict] = []
-        self._emit(double_ops, "add", target=power_var,
-                   left={"type": "var", "name": power_var},
-                   right={"type": "var", "name": power_var})
-        body_ops.append({
-            "op": "if",
-            "cond_ops": cond_ops2,
-            "cond": {"type": "var", "name": cond_var2},
-            "body": double_ops,
-            "else": None,
-        })
-
-        out.append({
-            "op": "while",
-            "cond_ops": cond_ops,
-            "cond": {"type": "var", "name": cond_var},
-            "body": body_ops,
-        })
-
-        # target = result
-        self._emit(out, "set", target=target,
-                   value={"type": "var", "name": result_var})
+        l_var = self._fresh()
+        r_var = self._fresh()
+        self._emit(out, "set", target=l_var, value=lv)
+        self._emit(out, "set", target=r_var, value=rv)
+        self._emit(
+            out,
+            "stdlib_call",
+            target=target,
+            stdlib="stdlib/string/concat",
+            args=[{"type": "var", "name": l_var}, {"type": "var", "name": r_var}],
+        )
 
     def _lower_for(self, node: dict) -> dict:
         init = self._lower_for_header(node.get("init"))
@@ -567,9 +502,7 @@ def _fmt_value(v: dict) -> str:
         val = v["value"]
         if isinstance(val, bool):
             return "true" if val else "false"
-        if isinstance(val, str):
-            return f'"{val}"'
-        return str(val)
+        return f'"{val}"' if isinstance(val, str) else str(val)
     if v["type"] == "var":
         return v["name"]
     if v["type"] == "fstring":
@@ -622,6 +555,9 @@ def to_text(ir: dict) -> str:
             tgt_part = "" if tgt == "_" else f"{tgt} = "
             args = " ".join(_fmt_value(a) for a in instr["args"])
             push(depth, f"call {tgt_part}{instr['callee']}({args})")
+        elif op == "stdlib_call":
+            args = " ".join(_fmt_value(a) for a in instr["args"])
+            push(depth, f"stdlib_call {instr['stdlib']}({args}) -> {instr['target']}")
         elif op == "print":
             push(depth, f"print {_fmt_value(instr['value'])}")
         elif op == "return":

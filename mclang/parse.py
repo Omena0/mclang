@@ -209,7 +209,7 @@ class Parser:
             self.stream.consume()
 
             frac = self.stream.consume_while(lambda c: c.isdigit())
-            raw = digits + "." + frac
+            raw = f"{digits}.{frac}"
             value: int | float = float(raw)
             kind = "float"
 
@@ -334,9 +334,7 @@ class Parser:
             return node
         if self._try_word("else"):
             self._blank()
-            if self._match("{"):
-                return self._parse_block()
-            return self._parse_stmt()
+            return self._parse_block() if self._match("{") else self._parse_stmt()
         return None
 
     def _parse_while(self) -> dict:
@@ -432,9 +430,7 @@ class Parser:
 
     def _parse_block_or_brace(self) -> dict:
         self._blank()
-        if self._match("{"):
-            return self._parse_block()
-        return self._parse_stmt()
+        return self._parse_block() if self._match("{") else self._parse_stmt()
 
     def _parse_expr_or_empty(self) -> dict | None:
         self._ws(True)
@@ -448,9 +444,7 @@ class Parser:
     def _parse_expr(self, nl: bool = False) -> dict:
         left = self._parse_binop(0, nl)
         self._ws(nl)
-        op = self._peek_assign_op()
-
-        if op:
+        if op := self._peek_assign_op():
             self._consume_op(op)
             right = self._parse_expr(nl)
             return self.stream.emit(
@@ -596,17 +590,13 @@ class Parser:
             if self._match(op):
                 return op
         c = self.stream.peek()
-        if c in "+-*/%<>":
-            return c
-        return None
+        return c if c in "+-*/%<>" else None
 
     def _peek_assign_op(self) -> str | None:
         for op in ("+=", "-=", "*=", "/=", "%="):
             if self._match(op):
                 return op
-        if self._match("="):
-            return "="
-        return None
+        return "=" if self._match("=") else None
 
     def _consume_op(self, op: str) -> None:
         if not self.stream.consume_text(op):

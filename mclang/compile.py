@@ -74,7 +74,7 @@ _CMP_REVERSE = {
     "eq": "eq", "ne": "ne", "lt": "gt", "gt": "lt", "le": "ge", "ge": "le",
 }
 
-_BUILTINS = {"print"}
+_BUILTINS = {"print", "len"}
 
 # Reserved global variable names in storage.
 _ARG_PREFIX = "_arg"
@@ -119,10 +119,10 @@ class MCCompiler:
             self._str_kt = 0
             body_cmds: list[str] = []
             # Copy args from global storage slots into function-local storage.
-            for i, p in enumerate(fn["params"]):
-                body_cmds.append(
-                    f"data modify storage {_STORAGE_ROOT} {self._func}.{p} set from storage {_STORAGE_ROOT} {_ARG(i)}"
-                )
+            body_cmds.extend(
+                f"data modify storage {_STORAGE_ROOT} {self._func}.{p} set from storage {_STORAGE_ROOT} {_ARG(i)}"
+                for i, p in enumerate(fn["params"])
+            )
             self._emit_insts(fn["body"], body_cmds)
             self.files[fn_id(fn["name"])] = body_cmds
 
@@ -135,12 +135,12 @@ class MCCompiler:
         """Return the full storage path for a variable, or None for scoreboard temps."""
         if varname == _RET or varname.startswith(_ARG_PREFIX):
             return f"storage {_STORAGE_ROOT} {varname}"
-        if varname.startswith("_t"):
+        if varname.startswith("_t") or varname.startswith("_c"):
             return None
         return f"storage {_STORAGE_ROOT} {self._func}.{varname}"
 
     def _temp(self) -> str:
-        name = f"_t{self._kt}"
+        name = f"_c{self._kt}"
         self._kt += 1
         return name
 
@@ -229,6 +229,8 @@ class MCCompiler:
         return f"data modify {path} set value {json.dumps(val)}"
 
     def _copy_var(self, target: str, src: str, out: list[str]) -> None:
+        if src in self._str_var_map:
+            src = self._str_var_map[src]
         tgt_path = self._var_path(target)
         src_path = self._var_path(src)
         if src_path is None:
@@ -252,7 +254,7 @@ class MCCompiler:
         is_temp = target.startswith("_t")
         if value["type"] == "literal":
             val = value.get("value")
-            if isinstance(val, str):
+            if isinstance(val, (str, list)):
                 self._types[target] = "string"
                 if is_temp:
                     sv = self._str_temp()
@@ -339,30 +341,14 @@ class MCCompiler:
             return True
         if v.get("type") == "var" and self._types.get(v["name"]) == "string":
             return True
-        if v.get("type") == "fstring":
-            return True
-        return False
+        return v.get("type") == "fstring"
 
     def _str_concat(self, inst: dict, out: list[str]) -> None:
         target = inst["target"]
         left = inst["left"]
         right = inst["right"]
         self._types[target] = "string"
-
-        components = []
-        for part in (left, right):
-            components.extend(self._value_to_components(part))
-
-        if target.startswith("_t"):
-            if target in self._str_var_map:
-                path = self._var_path(self._str_var_map[target])
-            else:
-                sv = self._str_temp()
-                self._str_var_map[target] = sv
-                path = self._var_path(sv)
-        else:
-            path = self._var_path(target)
-        out.append(f"data modify {path} set value {json.dumps(components, separators=(',', ':'))}")
+        self._stdlib_call("stdlib/string/concat", [left, right], target, out)
 
     def _op_sub(self, inst, out): self._arith("sub", inst, out)
     def _op_mul(self, inst, out): self._arith("mul", inst, out)
@@ -374,23 +360,20 @@ class MCCompiler:
         left = inst["left"]
         right = inst["right"]
 
+        ltemp = self._temp()
         # Load left operand into a temp scoreboard.
         if left["type"] == "var" and left["name"] == target:
-            ltemp = self._temp()
             self._load_to_temp(left, ltemp, out)
         elif left["type"] == "literal":
-            ltemp = self._temp()
             out.append(f"scoreboard players set {ltemp} _var {self._fmt_lit(left)}")
         else:
-            ltemp = self._temp()
             self._load_to_temp(left, ltemp, out)
 
+        rtemp = self._temp()
         # Load right operand into a temp scoreboard.
         if right["type"] == "literal":
-            rtemp = self._temp()
             out.append(f"scoreboard players set {rtemp} _var {self._fmt_lit(right)}")
         else:
-            rtemp = self._temp()
             self._load_to_temp(right, rtemp, out)
 
         # Perform arithmetic on the temps.
@@ -540,10 +523,8 @@ class MCCompiler:
                     f"execute store result {tgt_path} run scoreboard players get {temp} _var"
                 )
         target = inst["target"]
-        if target == "_":
-            out.append(f"function {fid} with storage {_STORAGE_ROOT}.{fid}")
-        else:
-            out.append(f"function {fid} with storage {_STORAGE_ROOT}.{fid}")
+        out.append(f"function {fid} with storage {_STORAGE_ROOT}.{fid}")
+        if target != "_":
             tgt_path = self._var_path(target)
             ret_path = f"storage {_STORAGE_ROOT} {_RET}"
             temp = self._temp()
@@ -562,19 +543,81 @@ class MCCompiler:
             if len(inst["args"]) != 1:
                 raise SyntaxError("print expects exactly one argument")
             out.append(f"tellraw @a {self._tellraw_json(inst['args'][0])}")
+        elif name == "len":
+            self._builtin_len(inst, out)
         else:
             raise NotImplementedError(f"unknown builtin '{name}'")
+
+    def _builtin_len(self, inst: dict, out: list[str]) -> None:
+        if len(inst["args"]) != 1:
+            raise SyntaxError("len expects exactly one argument")
+        target = inst["target"]
+        arg = inst["args"][0]
+        if arg["type"] == "literal" and isinstance(arg.get("value"), str):
+            out.append(f"scoreboard players set {target} _var {len(arg['value'])}")
+            self._types[target] = "number"
+        else:
+            self._stdlib_call("stdlib/string/len", [arg], target, out)
+
+    def _stdlib_call(self, stdlib: str, args: list[dict], target: str, out: list[str]) -> None:
+        """Emit a call to a stdlib function with proper argument passing.
+
+        Sets args into global _arg<i> storage slots, then emits
+        ``function {stdlib} with storage mypack:mem.{stdlib_func}``.
+        The stdlib function copies args from _arg<i> into its own namespace
+        and writes the result to ``mypack:mem._ret``.
+        """
+        # Place args into global _arg<i> storage slots.
+        for i, arg in enumerate(args):
+            if arg["type"] == "literal" and isinstance(arg.get("value"), str):
+                out.append(self._set_storage_cmd(_ARG(i), arg))
+            elif arg["type"] == "literal" and isinstance(arg.get("value"), (int, float)):
+                out.append(self._set_storage_cmd(_ARG(i), arg))
+                out.append(f"scoreboard players set {_ARG(i)} _var {int(arg['value'])}")
+            elif arg["type"] == "var":
+                name = arg["name"]
+                if name in self._str_var_map:
+                    name = self._str_var_map[name]
+                src_path = self._var_path(name)
+                tgt_path = f"storage {_STORAGE_ROOT} {_ARG(i)}"
+                if src_path is None:
+                    temp = self._temp()
+                    out.append(f"scoreboard players set {temp} _var 0")
+                    out.append(f"scoreboard players operation {temp} _var = {name} _var")
+                    out.append(f"execute store result {tgt_path} run scoreboard players get {temp} _var")
+                    out.append(f"scoreboard players operation {_ARG(i)} _var = {temp} _var")
+                else:
+                    out.append(f"data modify {tgt_path} set from {src_path}")
+            else:
+                raise NotImplementedError(f"stdlib_call arg type: {arg['type']}")
+
+        # Emit the function call.
+        out.append(f"function {stdlib}")
+
+        # Copy result from _ret storage directly to target (handles both strings and numbers).
+        tgt_path = self._var_path(target)
+        ret_path = f"storage {_STORAGE_ROOT} {_RET}"
+        out.append(f"data modify {tgt_path} set from {ret_path}")
+
+    def _op_stdlib_call(self, inst: dict, out: list[str]) -> None:
+        target = inst["target"]
+        stdlib = inst["stdlib"]
+        args = inst["args"]
+        self._stdlib_call(stdlib, args, target, out)
+        self._types[target] = "number" if stdlib == "stdlib/string/len" else "string"
 
     def _resolve_var_to_components(self, name: str) -> list[dict]:
         """Resolve a variable name to text component(s), handling string-temp mapping."""
         if name in self._str_var_map:
             name = self._str_var_map[name]
         path = self._var_path(name)
-        if path is not None and path.startswith("storage "):
+        # String variables are stored as NBT in storage.
+        if path is not None and path.startswith("storage ") and self._types.get(name) == "string":
             storage_path = path[len("storage "):]
             storage_name, nbt_path = storage_path.split(" ", 1)
             return [{"nbt": nbt_path, "storage": storage_name}]
-        if name.startswith("_t"):
+        # Number variables and _t temps are stored as scoreboard scores.
+        if name.startswith("_t") or self._types.get(name) == "number":
             return [{"score": {"name": name, "objective": "_var"}}]
         raise NotImplementedError(f"cannot use variable as text: {name}")
 
@@ -631,10 +674,12 @@ class MCCompiler:
                 )
             out.append("return 0")
         elif val["type"] == "literal":
-            out.append(
-                f"data modify storage {_STORAGE_ROOT} {_RET} set value {self._fmt_lit(val)}"
+            out.extend(
+                (
+                    f"data modify storage {_STORAGE_ROOT} {_RET} set value {self._fmt_lit(val)}",
+                    "return 0",
+                )
             )
-            out.append("return 0")
         else:
             raise NotImplementedError("cannot return this value")
 
@@ -759,6 +804,14 @@ class MCCompiler:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
 
+        stdlib_dir = os.path.join(os.path.dirname(__file__), "..", "stdlib")
+        if os.path.isdir(stdlib_dir):
+            import shutil
+            dest = os.path.join(out_dir, "stdlib")
+            if os.path.exists(dest):
+                shutil.rmtree(dest)
+            shutil.copytree(stdlib_dir, dest)
+
 
 # --------------------------------------------------------------------------- #
 # Module-level helpers
@@ -782,9 +835,7 @@ def _truthy(v, kind=None) -> bool:
         return v
     if isinstance(v, (int, float)):
         return v != 0
-    if isinstance(v, str):
-        return v != ""
-    return bool(v)
+    return v != "" if isinstance(v, str) else bool(v)
 
 
 def _eval_const(op: str, a, b) -> bool:
@@ -817,9 +868,6 @@ if __name__ == "__main__":
         text = f.read()
     try:
         compile_source(text, out)
-    except NotImplementedError as exc:
-        print(f"CompileError: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except SyntaxError as exc:
+    except (NotImplementedError, SyntaxError) as exc:
         print(f"CompileError: {exc}", file=sys.stderr)
         sys.exit(1)

@@ -146,9 +146,7 @@ def _inline_functions(ir: dict) -> dict:
     def _is_inlineable(fn: dict) -> bool:
         if fn.get("op") != "fn":
             return False
-        if len(fn.get("body", [])) > _INLINE_THRESHOLD:
-            return False
-        return True
+        return len(fn.get("body", [])) <= _INLINE_THRESHOLD
 
     def _inline_call(instr: dict) -> list[dict]:
         callee = instr.get("callee")

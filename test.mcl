@@ -1,0 +1,9 @@
+
+fn main() {
+    result = "Hello" + " World"
+    print(result)
+    doubled = "ab" * 3
+    print(doubled)
+    l = len("test")
+    print(l)
+}
